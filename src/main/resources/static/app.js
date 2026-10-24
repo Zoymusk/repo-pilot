@@ -41,7 +41,7 @@ async function postJson(path, payload) {
   }
 
   if (!response.ok) {
-    const message = data && (data.message || data.detail || data.title);
+    const message = data && (data.detail || data.message || data.title);
     throw new Error(message || `Request failed (${response.status}). Please try again.`);
   }
   if (!data || typeof data !== "object") {
@@ -124,8 +124,13 @@ indexForm.addEventListener("submit", async (event) => {
   indexFeedback.hidden = true;
   setLoading(indexButton, true);
   try {
-    const repositoryUrl = new FormData(indexForm).get("repositoryUrl").trim();
-    const result = await postJson("/api/repositories/index", { repositoryUrl });
+    const formData = new FormData(indexForm);
+    const repositoryUrl = formData.get("repositoryUrl").trim();
+    const pathPrefix = formData.get("pathPrefix").trim();
+    const result = await postJson("/api/repositories/index", {
+      repositoryUrl,
+      pathPrefix: pathPrefix || null
+    });
     if (!Number.isInteger(result.indexedChunkCount)) {
       throw new Error("Repo Pilot returned an invalid index count. Please try again.");
     }

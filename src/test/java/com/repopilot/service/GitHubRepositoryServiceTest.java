@@ -10,6 +10,8 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GitHubRepositoryServiceTest {
 
@@ -69,5 +71,53 @@ class GitHubRepositoryServiceTest {
 
         assertDoesNotThrow(() -> service.deleteTemporaryDirectory(temporaryDirectory));
         assertEquals(3, cleanupAttempts[0]);
+    }
+
+    @Test
+    void normalizesSeveralPrefixesAndMatchesLiteralPathPrefixes() {
+        var prefixes = GitHubRepositoryService.normalizePathPrefixes(
+                " src\\main\\java\\com\\Example, src/main/resources, src/main/java/com/Order"
+        );
+
+        assertEquals(
+                java.util.List.of("src/main/java/com/Example", "src/main/resources", "src/main/java/com/Order"),
+                prefixes
+        );
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix(
+                "src/main/java/com/Example.java",
+                prefixes.get(0)
+        ));
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix(
+                "src/main/java/com/OrderService.java",
+                "src/main/java/com/Order"
+        ));
+        assertFalse(GitHubRepositoryService.isUnderPathPrefix(
+                "src/main/java/com/Examples.java",
+                "src/main/java/com/Example/"
+        ));
+    }
+
+    @Test
+    void normalizesSinglePrefixAndMatchesLiteralPrefix() {
+        String prefix = GitHubRepositoryService.normalizePathPrefix(" src\\main\\java\\ ");
+
+        assertEquals("src/main/java", prefix);
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix("src/main/java/App.java", prefix));
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix("src/main/javascript/App.java", prefix));
+        assertFalse(GitHubRepositoryService.isUnderPathPrefix("src/test/java/App.java", prefix));
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix("src/App.java", ""));
+        assertTrue(GitHubRepositoryService.isUnderPathPrefix("src/main/java/App.java", "src/main/java/App"));
+        assertEquals(java.util.List.of(), GitHubRepositoryService.normalizePathPrefixes(" , , "));
+    }
+
+    @Test
+    void rejectsAbsoluteAndTraversalFolderPrefixes() {
+        assertThrows(IllegalArgumentException.class, () -> GitHubRepositoryService.normalizePathPrefix("../src"));
+        assertThrows(IllegalArgumentException.class, () -> GitHubRepositoryService.normalizePathPrefix("/src"));
+        assertThrows(IllegalArgumentException.class, () -> GitHubRepositoryService.normalizePathPrefix("src/../test"));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> GitHubRepositoryService.normalizePathPrefix("a".repeat(513))
+        );
     }
 }

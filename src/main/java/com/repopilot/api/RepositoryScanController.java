@@ -3,6 +3,7 @@ package com.repopilot.api;
 import com.repopilot.service.GitHubRepositoryService;
 import com.repopilot.service.GeminiAnswerService.Answer;
 import com.repopilot.service.GeminiAnswerService;
+import com.repopilot.service.GeminiEmbeddingService;
 import com.repopilot.service.InMemoryVectorStore.SearchResult;
 import com.repopilot.service.MethodChunkerService.MethodChunk;
 import com.repopilot.service.RepositoryIndexService;
@@ -77,9 +78,21 @@ public class RepositoryScanController {
     }
 
     @PostMapping("/index")
-    public RepositoryIndexResponse index(@Valid @RequestBody RepositoryScanRequest request) {
+    public RepositoryIndexResponse index(@Valid @RequestBody RepositoryIndexRequest request) {
+        logger.info(
+                "Received repository index request for {} with pathPrefix '{}'",
+                request.repositoryUrl(),
+                request.pathPrefix() == null || request.pathPrefix().isBlank() ? "." : request.pathPrefix()
+        );
         try {
-            return new RepositoryIndexResponse(indexService.index(request.repositoryUrl()));
+            return new RepositoryIndexResponse(indexService.index(request.repositoryUrl(), request.pathPrefix()));
+        } catch (RepositoryIndexService.IndexingInProgressException exception) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, exception.getMessage(), exception);
+        } catch (RepositoryIndexService.IndexLimitExceededException exception) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, exception.getMessage(), exception);
+        } catch (GeminiEmbeddingService.DailyEmbeddingQuotaExceededException exception) {
+            logger.warn("Gemini daily embedding quota is exhausted", exception);
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, exception.getMessage(), exception);
         } catch (IllegalArgumentException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
         } catch (IllegalStateException exception) {
@@ -141,6 +154,9 @@ public class RepositoryScanController {
     }
 
     public record RepositoryScanRequest(@NotBlank String repositoryUrl) {
+    }
+
+    public record RepositoryIndexRequest(@NotBlank String repositoryUrl, String pathPrefix) {
     }
 
     public record RepositorySearchRequest(@NotBlank String question) {

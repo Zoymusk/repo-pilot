@@ -20,6 +20,8 @@ import java.nio.file.attribute.DosFileAttributeView;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Arrays;
 import java.util.stream.Stream;
 
 @Service
@@ -28,6 +30,7 @@ public class GitHubRepositoryService {
     private static final Logger logger = LoggerFactory.getLogger(GitHubRepositoryService.class);
     private static final int CLEANUP_ATTEMPTS = 3;
     private static final long CLEANUP_RETRY_DELAY_MILLIS = 200;
+    private static final int MAX_PATH_PREFIX_LENGTH = 512;
 
     private final MethodChunkerService methodChunkerService;
 
@@ -47,17 +50,93 @@ public class GitHubRepositoryService {
     }
 
     public List<MethodChunkerService.MethodChunk> chunks(String repositoryUrl) throws IOException, GitAPIException {
-        return withClonedRepository(repositoryUrl, repositoryDirectory -> {
-            List<MethodChunkerService.MethodChunk> chunks = new ArrayList<>();
-            for (String filePath : findJavaFiles(repositoryDirectory)) {
-                if (filePath.startsWith("src/test/")) {
-                    continue;
+        return chunks(repositoryUrl, null);
+    }
+
+    public List<MethodChunkerService.MethodChunk> chunks(String repositoryUrl, String pathPrefix)
+            throws IOException, GitAPIException {
+        return chunks(repositoryUrl, pathPrefix, Integer.MAX_VALUE);
+    }
+
+    public List<MethodChunkerService.MethodChunk> chunks(
+            String repositoryUrl,
+            String pathPrefix,
+            int maxChunks
+    ) throws IOException, GitAPIException {
+        List<String> normalizedPrefixes = normalizePathPrefixes(pathPrefix);
+        try {
+            return withClonedRepository(repositoryUrl, repositoryDirectory -> {
+                List<String> scopedFiles = findJavaFiles(repositoryDirectory).stream()
+                        .filter(filePath -> !filePath.startsWith("src/test/"))
+                        .filter(filePath -> isUnderAnyPathPrefix(filePath, normalizedPrefixes))
+                        .toList();
+                logger.info(
+                        "Found {} Java files in path prefix '{}' after cloning repository {}",
+                        scopedFiles.size(),
+                        normalizedPrefixes.isEmpty() ? "." : String.join(",", normalizedPrefixes),
+                        repositoryUrl
+                );
+
+                List<MethodChunkerService.MethodChunk> chunks = new ArrayList<>();
+                logger.info("Starting chunking of {} Java files for {}", scopedFiles.size(), repositoryUrl);
+                for (String filePath : scopedFiles) {
+                    String source = Files.readString(repositoryDirectory.resolve(filePath));
+                    int remainingChunkLimit = maxChunks - chunks.size();
+                    chunks.addAll(methodChunkerService.chunk(source, filePath, remainingChunkLimit));
                 }
-                String source = Files.readString(repositoryDirectory.resolve(filePath));
-                chunks.addAll(methodChunkerService.chunk(source, filePath));
-            }
-            return List.copyOf(chunks);
-        });
+                logger.info("Chunked {} Java files into {} chunks for {}", scopedFiles.size(), chunks.size(), repositoryUrl);
+                return List.copyOf(chunks);
+            });
+        } catch (IOException | GitAPIException | RuntimeException exception) {
+            logger.error("Repository clone or chunking stage failed for {}", repositoryUrl, exception);
+            throw exception;
+        }
+    }
+
+    static String normalizePathPrefix(String pathPrefix) {
+        if (pathPrefix == null || pathPrefix.isBlank()) {
+            return "";
+        }
+        String normalizedPrefix = pathPrefix.trim().replace('\\', '/');
+        if (normalizedPrefix.length() > MAX_PATH_PREFIX_LENGTH) {
+            throw new IllegalArgumentException(
+                    "Path prefix must be no longer than " + MAX_PATH_PREFIX_LENGTH + " characters"
+            );
+        }
+        normalizedPrefix = normalizedPrefix.replaceAll("/+$", "");
+        if (normalizedPrefix.isBlank()
+                || normalizedPrefix.startsWith("/")
+                || normalizedPrefix.matches("^[A-Za-z]:.*")
+                || Stream.of(normalizedPrefix.split("/", -1))
+                        .anyMatch(segment -> segment.isBlank() || segment.equals(".") || segment.equals(".."))) {
+            throw new IllegalArgumentException("Path prefix must be a repository-relative folder path");
+        }
+        return normalizedPrefix;
+    }
+
+    static List<String> normalizePathPrefixes(String pathPrefixes) {
+        if (pathPrefixes == null || pathPrefixes.isBlank()) {
+            return List.of();
+        }
+        if (pathPrefixes.length() > MAX_PATH_PREFIX_LENGTH) {
+            throw new IllegalArgumentException(
+                    "Path prefixes must be no longer than " + MAX_PATH_PREFIX_LENGTH + " characters"
+            );
+        }
+        return Arrays.stream(pathPrefixes.split(",", -1))
+                .map(String::trim)
+                .filter(prefix -> !prefix.isBlank())
+                .map(GitHubRepositoryService::normalizePathPrefix)
+                .distinct()
+                .toList();
+    }
+
+    static boolean isUnderPathPrefix(String filePath, String pathPrefix) {
+        return pathPrefix.isEmpty() || filePath.startsWith(pathPrefix);
+    }
+
+    private boolean isUnderAnyPathPrefix(String filePath, List<String> pathPrefixes) {
+        return pathPrefixes.isEmpty() || pathPrefixes.stream().anyMatch(prefix -> isUnderPathPrefix(filePath, prefix));
     }
 
     private <T> T withClonedRepository(String repositoryUrl, RepositoryOperation<T> operation)
@@ -73,6 +152,7 @@ public class GitHubRepositoryService {
                     .setTimeout(30)
                     .call();
                  Repository repository = git.getRepository()) {
+                logger.info("Clone completed for {}", repositoryUri);
                 return operation.apply(temporaryDirectory);
             }
         } finally {

@@ -43,13 +43,14 @@
             <label for="repository-url">Repository URL</label>
             <div class="input-action">
               <input id="repository-url" name="repositoryUrl" type="url" placeholder="https://github.com/owner/repository" autocomplete="url" required>
+              <input id="path-prefix" name="pathPrefix" type="text" placeholder="Folder (optional)" aria-label="Folder">
               <button class="button button-primary" id="index-button" type="submit">
                 <span class="button-label">Index repository</span>
                 <span class="spinner" aria-hidden="true"></span>
                 <svg class="button-arrow" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
             </div>
-            <p class="field-hint">Public GitHub repositories only</p>
+            <p class="field-hint">Public GitHub repositories only. Folder accepts comma-separated path prefixes; a prefix may end at a file name without its extension.</p>
           </form>
           <div id="index-feedback" class="feedback" role="status" aria-live="polite" hidden></div>
         </article>

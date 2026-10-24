@@ -1,19 +1,34 @@
 package com.repopilot.service;
 
 import com.repopilot.service.MethodChunkerService.MethodChunk;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class InMemoryVectorStore {
 
-    private static final int SEARCH_RESULT_LIMIT = 5;
-
     private final AtomicReference<List<IndexedChunk>> indexedChunks = new AtomicReference<>(List.of());
+    private final int searchResultLimit;
+
+    public InMemoryVectorStore() {
+        this(12);
+    }
+
+    @Autowired
+    public InMemoryVectorStore(@Value("${repository.search.max-results:12}") int searchResultLimit) {
+        if (searchResultLimit < 1) {
+            throw new IllegalArgumentException("Repository search max-results must be positive");
+        }
+        this.searchResultLimit = searchResultLimit;
+    }
 
     public void replace(List<MethodChunk> chunks, List<List<Double>> embeddings) {
         if (chunks.size() != embeddings.size()) {
@@ -28,11 +43,25 @@ public class InMemoryVectorStore {
     }
 
     public List<SearchResult> search(List<Double> queryEmbedding) {
-        return indexedChunks.get().stream()
+        List<SearchResult> ranked = indexedChunks.get().stream()
                 .map(indexed -> new SearchResult(indexed.chunk(), cosineSimilarity(queryEmbedding, indexed.embedding())))
                 .sorted(Comparator.comparingDouble(SearchResult::score).reversed())
-                .limit(SEARCH_RESULT_LIMIT)
                 .toList();
+        Map<String, Integer> perFileCounts = new HashMap<>();
+        List<SearchResult> results = new ArrayList<>(searchResultLimit);
+        for (SearchResult result : ranked) {
+            String filePath = result.chunk().filePath();
+            int fileCount = perFileCounts.getOrDefault(filePath, 0);
+            if (fileCount >= 2) {
+                continue;
+            }
+            results.add(result);
+            perFileCounts.put(filePath, fileCount + 1);
+            if (results.size() == searchResultLimit) {
+                break;
+            }
+        }
+        return List.copyOf(results);
     }
 
     static double cosineSimilarity(List<Double> left, List<Double> right) {

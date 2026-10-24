@@ -40,12 +40,21 @@ class GeminiAnswerServiceTest {
                 .andExpect(jsonPath(
                         "$.generationConfig.responseSchema.properties.prPlan.properties.steps.items.properties.testsToAdd.type"
                 ).value("ARRAY"))
+                .andExpect(jsonPath(
+                        "$.generationConfig.responseSchema.properties.prPlan.properties.steps.items.properties.filesToCreate.type"
+                ).value("ARRAY"))
+                .andExpect(jsonPath(
+                        "$.generationConfig.responseSchema.properties.prPlan.properties.steps.items.properties.filesToModify.type"
+                ).value("ARRAY"))
+                .andExpect(jsonPath(
+                        "$.generationConfig.responseSchema.properties.prPlan.properties.steps.items.properties.referenceFiles.type"
+                ).value("ARRAY"))
                 .andRespond(withSuccess("""
                         {
                           "candidates": [{
                             "content": {
                               "parts": [{
-                                "text": "{\\"explanation\\":\\"The entry point starts the application.\\",\\"citations\\":[{\\"filePath\\":\\"src/main/java/example/App.java\\",\\"startLine\\":4,\\"endLine\\":6}],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Update startup behavior.\\",\\"filesToChange\\":[\\"src/main/java/example/App.java\\"],\\"testsToAdd\\":[{\\"testClass\\":\\"AppTest\\",\\"checks\\":\\"verifies startup invokes the application runner\\"}]}]}}"
+                                "text": "{\\"explanation\\":\\"The entry point starts the application.\\",\\"citations\\":[{\\"filePath\\":\\"src/main/java/example/App.java\\",\\"startLine\\":4,\\"endLine\\":6}],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Update startup behavior.\\",\\"filesToCreate\\":[\\"src/main/java/example/NewStartup.java\\"],\\"filesToModify\\":[\\"src/main/java/example/App.java\\"],\\"referenceFiles\\":[\\"src/main/java/example/App.java\\"],\\"testsToAdd\\":[{\\"testClass\\":\\"AppTest\\",\\"checks\\":\\"verifies startup invokes the application runner\\"}]}]}}"
                               }]
                             }
                           }]
@@ -74,6 +83,8 @@ class GeminiAnswerServiceTest {
         assertEquals(List.of(new GeminiAnswerService.TestToAdd(
                 "AppTest", "verifies startup invokes the application runner")),
                 answer.prPlan().steps().get(0).testsToAdd());
+        assertEquals(List.of("src/main/java/example/NewStartup.java"),
+                answer.prPlan().steps().get(0).filesToCreate());
         server.verify();
     }
 
@@ -88,7 +99,7 @@ class GeminiAnswerServiceTest {
                           "candidates": [{
                             "content": {
                               "parts": [{
-                                "text": "{\\"explanation\\":\\"Answer.\\",\\"extra\\":true,\\"citations\\":[],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Make a change.\\",\\"filesToChange\\":[],\\"unexpected\\":\\"ignored\\"}]}}"
+                                "text": "{\\"explanation\\":\\"Answer.\\",\\"extra\\":true,\\"citations\\":[],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Make a change.\\",\\"filesToCreate\\":[],\\"filesToModify\\":[],\\"referenceFiles\\":[],\\"unexpected\\":\\"ignored\\"}]}}"
                               }]
                             }
                           }]
@@ -99,6 +110,62 @@ class GeminiAnswerServiceTest {
         Answer answer = answerService.answer("Question?", null, List.of());
 
         assertEquals(List.of(), answer.prPlan().steps().get(0).testsToAdd());
+        server.verify();
+    }
+
+    @Test
+    void rejectsFilesToModifyThatWereNotRetrieved() {
+        RestClient.Builder restClientBuilder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
+        String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
+        String invalidAnswer = """
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{
+                        "text": "{\\"explanation\\":\\"Answer.\\",\\"citations\\":[],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Change it.\\",\\"filesToCreate\\":[],\\"filesToModify\\":[\\"not-retrieved.java\\"],\\"referenceFiles\\":[],\\"testsToAdd\\":[]}]}}"
+                      }]
+                    }
+                  }]
+                }
+                """;
+        server.expect(requestTo(endpoint)).andRespond(withSuccess(invalidAnswer, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(endpoint)).andRespond(withSuccess(invalidAnswer, MediaType.APPLICATION_JSON));
+        GeminiAnswerService answerService = answerService(restClientBuilder, "gemini-test", "");
+
+        assertThrows(
+                GeminiAnswerService.InvalidGeminiResponseException.class,
+                () -> answerService.answer("Question?", null, List.of())
+        );
+
+        server.verify();
+    }
+
+    @Test
+    void rejectsReferenceFilesThatWereNotRetrieved() {
+        RestClient.Builder restClientBuilder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
+        String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
+        String invalidAnswer = """
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{
+                        "text": "{\\"explanation\\":\\"Answer.\\",\\"citations\\":[],\\"prPlan\\":{\\"steps\\":[{\\"description\\":\\"Use it.\\",\\"filesToCreate\\":[],\\"filesToModify\\":[],\\"referenceFiles\\":[\\"not-retrieved.java\\"],\\"testsToAdd\\":[]}]}}"
+                      }]
+                    }
+                  }]
+                }
+                """;
+        server.expect(requestTo(endpoint)).andRespond(withSuccess(invalidAnswer, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(endpoint)).andRespond(withSuccess(invalidAnswer, MediaType.APPLICATION_JSON));
+        GeminiAnswerService answerService = answerService(restClientBuilder, "gemini-test", "");
+
+        assertThrows(
+                GeminiAnswerService.InvalidGeminiResponseException.class,
+                () -> answerService.answer("Question?", null, List.of())
+        );
+
         server.verify();
     }
 
@@ -217,7 +284,7 @@ class GeminiAnswerServiceTest {
             String fallbackModel
     ) {
         return new GeminiAnswerService(
-                restClientBuilder,
+                restClientBuilder.build(),
                 new ObjectMapper(),
                 model,
                 fallbackModel,

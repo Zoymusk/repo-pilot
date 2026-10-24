@@ -64,6 +64,9 @@ textarea { min-height: 82px; padding: 11px 12px; resize: vertical; font-size: 13
 input::placeholder, textarea::placeholder { color: #687080; }
 input:focus, textarea:focus { border-color: #71884f; box-shadow: 0 0 0 3px rgba(182,243,106,.07); outline: none; }
 .input-action { display: flex; gap: 8px; }
+.input-action input { min-width: 0; }
+.input-action input:first-child { flex: 1.5; }
+.input-action input:nth-child(2) { flex: 1; }
 .button { display: inline-flex; min-height: 42px; flex: 0 0 auto; align-items: center; justify-content: center; gap: 9px; padding: 0 14px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700; transition: transform .15s, background .15s, border-color .15s; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
 .button:disabled { cursor: wait; opacity: .7; }

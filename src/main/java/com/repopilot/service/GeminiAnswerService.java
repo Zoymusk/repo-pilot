@@ -7,6 +7,7 @@ import com.repopilot.service.InMemoryVectorStore.SearchResult;
 import com.repopilot.service.MethodChunkerService.MethodChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Service;
@@ -38,6 +39,7 @@ public class GeminiAnswerService {
     private final String fallbackModel;
     private final String apiKey;
 
+    @Autowired
     public GeminiAnswerService(
             RestClient.Builder restClientBuilder,
             ObjectMapper objectMapper,
@@ -45,7 +47,17 @@ public class GeminiAnswerService {
             @Value("${GEMINI_FALLBACK_MODEL:}") String fallbackModel,
             @Value("${GEMINI_API_KEY:}") String apiKey
     ) {
-        this.restClient = restClientBuilder.build();
+        this(GeminiRestClientFactory.build(restClientBuilder), objectMapper, model, fallbackModel, apiKey);
+    }
+
+    GeminiAnswerService(
+            RestClient restClient,
+            ObjectMapper objectMapper,
+            String model,
+            String fallbackModel,
+            String apiKey
+    ) {
+        this.restClient = restClient;
         this.objectMapper = objectMapper;
         this.model = model;
         this.fallbackModel = fallbackModel;
@@ -89,14 +101,17 @@ public class GeminiAnswerService {
                 Return only a JSON object with exactly these fields:
                 - "explanation": a string answering the question
                 - "citations": an array of objects with "filePath", "startLine", and "endLine"
-                - "prPlan": an object with "steps", an array of objects with "description", "filesToChange",
-                  and "testsToAdd"
-                - "filesToChange": an array of file paths from the retrieved chunks
-                - "testsToAdd": a non-empty array of objects with "testClass" and "checks"; each testClass
-                  names the test class to add, and checks describes what that test verifies
-                Cite only paths and line ranges present in the retrieved chunks. Every filesToChange path must
-                be one of the retrieved chunk paths. Do not invent repository files or citations.
-                Every PR plan step must include at least one test to add.
+                - "prPlan": an object with "steps", an array of objects with "description", "filesToCreate",
+                  "filesToModify", "referenceFiles", and "testsToAdd"
+                - "filesToCreate": paths for new files to add; these may not appear in the retrieved chunks
+                - "filesToModify": existing files to modify, each of which must be present in the retrieved chunks
+                - "referenceFiles": existing supporting files to consult, each of which must be present in the
+                  retrieved chunks
+                - "testsToAdd": an array of objects with "testClass" and "checks"; each testClass names the test
+                  class to add, and checks describes what that test verifies
+                Cite only paths and line ranges present in the retrieved chunks. Do not invent citations.
+                Do not put new files in "filesToModify" or "referenceFiles"; use "filesToCreate" instead.
+                Every PR plan step must include all three file lists and at least one test to add.
                 """);
         prompt.append("\nQuestion:\n").append(question);
         if (issueDescription != null && !issueDescription.isBlank()) {
@@ -211,7 +226,11 @@ public class GeminiAnswerService {
             List<PlanStep> steps = new ArrayList<>();
             for (JsonNode step : stepsNode) {
                 requireObject(step, "prPlan step");
-                requireFields(step, Set.of("description", "filesToChange"), "prPlan step");
+                requireFields(
+                        step,
+                        Set.of("description", "filesToCreate", "filesToModify", "referenceFiles"),
+                        "prPlan step"
+                );
                 List<TestToAdd> testsToAdd = new ArrayList<>();
                 if (step.has("testsToAdd")) {
                     JsonNode testsNode = requireArray(step.get("testsToAdd"), "prPlan step.testsToAdd");
@@ -226,7 +245,9 @@ public class GeminiAnswerService {
                 }
                 steps.add(new PlanStep(
                         requireText(step.get("description"), "prPlan step.description"),
-                        requireTextArray(step.get("filesToChange"), "prPlan step.filesToChange"),
+                        requireTextArray(step.get("filesToCreate"), "prPlan step.filesToCreate"),
+                        requireTextArray(step.get("filesToModify"), "prPlan step.filesToModify"),
+                        requireTextArray(step.get("referenceFiles"), "prPlan step.referenceFiles"),
                         List.copyOf(testsToAdd)
                 ));
             }
@@ -258,9 +279,10 @@ public class GeminiAnswerService {
             }
         }
         for (PlanStep step : answer.prPlan().steps()) {
-            if (!retrievedPaths.containsAll(step.filesToChange())) {
+            if (!retrievedPaths.containsAll(step.filesToModify())
+                    || !retrievedPaths.containsAll(step.referenceFiles())) {
                 throw new InvalidGeminiResponseException(
-                        "Gemini returned a PR plan file outside the retrieved chunks"
+                        "Gemini returned a modified or referenced PR plan file outside the retrieved chunks"
                 );
             }
         }
@@ -292,11 +314,18 @@ public class GeminiAnswerService {
                 .put("type", "OBJECT");
         ObjectNode stepProperties = stepSchema.putObject("properties");
         stepProperties.putObject("description").put("type", "STRING");
-        ObjectNode filesSchema = stepProperties.putObject("filesToChange").put("type", "ARRAY");
-        filesSchema.putObject("items").put("type", "STRING");
+        for (String field : List.of("filesToCreate", "filesToModify", "referenceFiles")) {
+            ObjectNode filesSchema = stepProperties.putObject(field).put("type", "ARRAY");
+            filesSchema.putObject("items").put("type", "STRING");
+        }
         ObjectNode testsSchema = stepProperties.putObject("testsToAdd").put("type", "ARRAY");
         testsSchema.set("items", testSchema);
-        stepSchema.putArray("required").add("description").add("filesToChange").add("testsToAdd");
+        stepSchema.putArray("required")
+                .add("description")
+                .add("filesToCreate")
+                .add("filesToModify")
+                .add("referenceFiles")
+                .add("testsToAdd");
 
         ObjectNode planSchema = objectMapper.createObjectNode()
                 .put("type", "OBJECT");
@@ -375,7 +404,13 @@ public class GeminiAnswerService {
     public record PullRequestPlan(List<PlanStep> steps) {
     }
 
-    public record PlanStep(String description, List<String> filesToChange, List<TestToAdd> testsToAdd) {
+    public record PlanStep(
+            String description,
+            List<String> filesToCreate,
+            List<String> filesToModify,
+            List<String> referenceFiles,
+            List<TestToAdd> testsToAdd
+    ) {
     }
 
     public record TestToAdd(String testClass, String checks) {
