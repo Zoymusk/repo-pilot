@@ -14,9 +14,13 @@ final class GeminiRestClientFactory {
     }
 
     static RestClient build(RestClient.Builder builder) {
+        return build(builder, READ_TIMEOUT);
+    }
+
+    static RestClient build(RestClient.Builder builder, Duration readTimeout) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(CONNECT_TIMEOUT);
-        requestFactory.setReadTimeout(READ_TIMEOUT);
+        requestFactory.setReadTimeout(readTimeout);
         return builder.requestFactory(requestFactory).build();
     }
 }

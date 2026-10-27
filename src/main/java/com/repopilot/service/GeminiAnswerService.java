@@ -14,7 +14,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.ResourceAccessException;
 
+import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -27,7 +30,8 @@ public class GeminiAnswerService {
     private static final Logger logger = LoggerFactory.getLogger(GeminiAnswerService.class);
     private static final String GENERATE_CONTENT_ENDPOINT =
             "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent";
-    private static final int MAX_ATTEMPTS = 5;
+    private static final Duration READ_TIMEOUT = Duration.ofSeconds(120);
+    private static final int MAX_ATTEMPTS = 2;
     private static final long INITIAL_RETRY_DELAY_MILLIS = 2_000;
     private static final long MAX_RETRY_JITTER_MILLIS = 500;
     private static final String MODEL_BUSY_MESSAGE =
@@ -47,7 +51,13 @@ public class GeminiAnswerService {
             @Value("${GEMINI_FALLBACK_MODEL:}") String fallbackModel,
             @Value("${GEMINI_API_KEY:}") String apiKey
     ) {
-        this(GeminiRestClientFactory.build(restClientBuilder), objectMapper, model, fallbackModel, apiKey);
+        this(
+                GeminiRestClientFactory.build(restClientBuilder, READ_TIMEOUT),
+                objectMapper,
+                model,
+                fallbackModel,
+                apiKey
+        );
     }
 
     GeminiAnswerService(
@@ -131,8 +141,8 @@ public class GeminiAnswerService {
     private JsonNode generateContent(String prompt) {
         try {
             return generateContent(prompt, model, MAX_ATTEMPTS);
-        } catch (RestClientResponseException exception) {
-            if (!isRetryable(exception.getStatusCode())) {
+        } catch (RestClientException exception) {
+            if (!isRetryable(exception)) {
                 throw exception;
             }
             if (fallbackModel.isBlank() || fallbackModel.equals(model)) {
@@ -151,33 +161,66 @@ public class GeminiAnswerService {
     private JsonNode generateContent(String prompt, String requestModel, int maxAttempts) {
         for (int attempt = 1; ; attempt++) {
             try {
-                return restClient.post()
-                        .uri(GENERATE_CONTENT_ENDPOINT.formatted(requestModel))
-                        .header("x-goog-api-key", apiKey)
-                        .body(new GenerateContentRequest(
-                                List.of(new Content(List.of(new Part(prompt)))),
-                                new GenerationConfig("application/json", createResponseSchema())
-                        ))
-                        .retrieve()
-                        .body(JsonNode.class);
-            } catch (RestClientResponseException exception) {
-                if (attempt >= maxAttempts || !isRetryable(exception.getStatusCode())) {
+                return invokeGenerateContent(prompt, requestModel);
+            } catch (RestClientException exception) {
+                if (attempt >= maxAttempts || !isRetryable(exception)) {
                     throw exception;
                 }
-                logger.warn(
-                        "Gemini model {} returned HTTP {}; retrying ({}/{})",
-                        requestModel,
-                        exception.getStatusCode().value(),
-                        attempt,
-                        maxAttempts
-                );
+                if (exception instanceof RestClientResponseException responseException) {
+                    logger.warn(
+                            "Gemini model {} returned HTTP {}; retrying ({}/{})",
+                            requestModel,
+                            responseException.getStatusCode().value(),
+                            attempt,
+                            maxAttempts
+                    );
+                } else {
+                    logger.warn(
+                            "Gemini model {} timed out while reading the response; retrying ({}/{})",
+                            requestModel,
+                            attempt,
+                            maxAttempts
+                    );
+                }
                 pauseBeforeRetry(attempt);
             }
         }
     }
 
-    private boolean isRetryable(HttpStatusCode statusCode) {
-        return statusCode.value() == 429 || statusCode.value() == 503;
+    private JsonNode invokeGenerateContent(String prompt, String requestModel) {
+        long callStartNanos = System.nanoTime();
+        try {
+            return restClient.post()
+                    .uri(GENERATE_CONTENT_ENDPOINT.formatted(requestModel))
+                    .header("x-goog-api-key", apiKey)
+                    .body(new GenerateContentRequest(
+                            List.of(new Content(List.of(new Part(prompt)))),
+                            new GenerationConfig("application/json", createResponseSchema())
+                    ))
+                    .retrieve()
+                    .body(JsonNode.class);
+        } finally {
+            logger.info(
+                    "Gemini generateContent call using model {} took {} seconds",
+                    requestModel,
+                    (System.nanoTime() - callStartNanos) / 1_000_000_000.0
+            );
+        }
+    }
+
+    private boolean isRetryable(RestClientException exception) {
+        if (exception instanceof RestClientResponseException responseException) {
+            HttpStatusCode statusCode = responseException.getStatusCode();
+            return statusCode.value() == 429 || statusCode.value() == 503;
+        }
+        if (exception instanceof ResourceAccessException) {
+            for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+                if (cause instanceof SocketTimeoutException) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     void pauseBeforeRetry(int attempt) {

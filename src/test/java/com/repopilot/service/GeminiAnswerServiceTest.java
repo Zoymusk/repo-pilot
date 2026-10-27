@@ -10,6 +10,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.net.SocketTimeoutException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,6 +21,7 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.springframework.http.HttpMethod.POST;
 
 class GeminiAnswerServiceTest {
@@ -205,14 +207,14 @@ class GeminiAnswerServiceTest {
     }
 
     @Test
-    void retries503FiveTimesThenUsesFallbackModelOnce() {
+    void retries503OnceThenUsesFallbackModelOnce() {
         RestClient.Builder restClientBuilder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
         String mainEndpoint =
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
         String fallbackEndpoint =
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-fallback:generateContent";
-        for (int attempt = 0; attempt < 5; attempt++) {
+        for (int attempt = 0; attempt < 2; attempt++) {
             server.expect(requestTo(mainEndpoint))
                     .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
         }
@@ -243,12 +245,69 @@ class GeminiAnswerServiceTest {
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
         String fallbackEndpoint =
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-fallback:generateContent";
-        for (int attempt = 0; attempt < 5; attempt++) {
+        for (int attempt = 0; attempt < 2; attempt++) {
             server.expect(requestTo(mainEndpoint))
                     .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS));
         }
         server.expect(requestTo(fallbackEndpoint))
                 .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        GeminiAnswerService answerService =
+                answerService(restClientBuilder, "gemini-test", "gemini-fallback");
+
+        GeminiAnswerService.GeminiModelBusyException exception = assertThrows(
+                GeminiAnswerService.GeminiModelBusyException.class,
+                () -> answerService.answer("Question?", null, List.of())
+        );
+
+        assertEquals("The AI model is busy. Please try again in a minute.", exception.getMessage());
+        server.verify();
+    }
+
+    @Test
+    void retriesReadTimeoutOnceThenUsesFallbackModelOnce() throws Exception {
+        RestClient.Builder restClientBuilder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
+        String mainEndpoint =
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
+        String fallbackEndpoint =
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-fallback:generateContent";
+        for (int attempt = 0; attempt < 2; attempt++) {
+            server.expect(requestTo(mainEndpoint))
+                    .andRespond(withException(new SocketTimeoutException("Read timed out")));
+        }
+        server.expect(requestTo(fallbackEndpoint))
+                .andRespond(withSuccess("""
+                        {
+                          "candidates": [{
+                            "content": {
+                              "parts": [{"text": "{\\"explanation\\":\\"Fallback answer after timeout.\\",\\"citations\\":[],\\"prPlan\\":{\\"steps\\":[]}}"}]
+                            }
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+        GeminiAnswerService answerService =
+                answerService(restClientBuilder, "gemini-test", "gemini-fallback");
+
+        Answer answer = answerService.answer("Question?", null, List.of());
+
+        assertEquals("Fallback answer after timeout.", answer.explanation());
+        server.verify();
+    }
+
+    @Test
+    void returnsBusyExceptionWhenMainAndFallbackReadTimeout() throws Exception {
+        RestClient.Builder restClientBuilder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
+        String mainEndpoint =
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent";
+        String fallbackEndpoint =
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-fallback:generateContent";
+        for (int attempt = 0; attempt < 2; attempt++) {
+            server.expect(requestTo(mainEndpoint))
+                    .andRespond(withException(new SocketTimeoutException("Read timed out")));
+        }
+        server.expect(requestTo(fallbackEndpoint))
+                .andRespond(withException(new SocketTimeoutException("Read timed out")));
         GeminiAnswerService answerService =
                 answerService(restClientBuilder, "gemini-test", "gemini-fallback");
 
