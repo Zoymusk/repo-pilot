@@ -33,6 +33,9 @@ I built Repo Pilot for the No Hands Challenge (Builders track), using voice as m
 - I still use the keyboard for short edits and for checking commands, file names, and settings, because a sentence can sound right and contain a wrong detail.
 
 What I liked most: Flow understood me well, and it knew when to start a new paragraph, so my long explanations came out ready to use without much editing.
+What worked: Fast, natural dictation that helped me write prompts and express ideas with less effort.
+What got in the way: Occasional transcription errors and the need to correct technical terms.
+What I’d want next: Better technical accuracy, more consistent transcription, and smoother integration with coding tools.
 
 ## Run it
 
